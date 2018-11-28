@@ -8,20 +8,38 @@ import glob
 import cv2
 from PIL import Image
 from sklearn.metrics import average_precision_score
+from torch.utils.data import DataLoader
+from dataloader import SegmentationImageDataset
 from unet_parts import *
 import random
 import operator
 import pickle
 
-masks_dir = '/media/sagan/Drive2/sagar/staqu_ocr/dataset/danik_bhaskar_class_maps/'
-images_dir = '/media/sagan/Drive2/sagar/staqu_ocr/dataset/danik_bhaskar_pngs/'
 save_dir = 'unet_final_checkpoint/'
 
-with open('/media/sagan/Drive2/sagar/staqu_ocr/dataset/danik_bhaskar_png_bbox_maps_adjacency_map.pkl') as f:
-    dicti = pickle.load(f)
+# borrow functions and modify it from https://github.com/Kaixhin/FCN-semantic-segmentation/blob/master/main.py
+# Calculates class intersections over unions
 
-with open('/media/sagan/Drive2/sagar/staqu_ocr/dataset/danik_bhaskar_png_bbox_maps.pkl') as f:
-    boxes = pickle.load(f)
+def iou(pred, target):
+    ious = []
+    unique, counts = np.unique(target, return_counts=True)
+    for cls in range(13):
+        pred_inds = pred == cls
+        target_inds = target == cls
+        intersection = pred_inds[target_inds].sum()
+        union = pred_inds.sum() + target_inds.sum() - intersection
+        if union == 0:
+            ious.append(float('nan'))  # if there is no ground truth, do not include in evaluation
+        else:
+            ious.append(float(intersection) / max(union, 1))
+        # print("cls", cls, pred_inds.sum(), target_inds.sum(), intersection, float(intersection) / max(union, 1))
+    return ious
+
+
+def pixel_acc(pred, target):
+    correct = (pred == target).sum()
+    total   = (target == target).sum()
+    return float(correct) / float(total)
 
 class UNet(nn.Module):
     def __init__(self, n_channels, n_classes):
@@ -53,7 +71,7 @@ class UNet(nn.Module):
 def train():
     
     net = UNet(n_channels=3, n_classes=13)
-    save_dir = 'unet_final_checkpoint/'
+    save_dir = '/media/sagan/Drive2/sagar/ocr_art_seg/weights/article_segmentation/unet_article_seg_checkpoint/'
     net.cuda(1)
     optimizer = optim.SGD(net.parameters(),
                           lr=0.1,
@@ -62,51 +80,43 @@ def train():
 
     criterion = nn.BCELoss()
     
+    image_list = glob.glob('/media/sagan/Drive2/sagar/ocr_art_seg/dataset/danik_bhaskar_pngs/' + '*.png') 
     
-    mean = [0.5657177752729754, 0.5381838567195789, 0.4972228365504561]
-    std = [0.29023818639817184, 0.2874722565279285, 0.2933830104791508]
-   
-    images = glob.glob(images_dir + "*.png")
-    train_images = images[0:33000]
-    test_images = images[33001:33976]
+    train_dataset = SegmentationImageDataset(image_list[0:30000], mask_dir='/media/sagan/Drive2/sagar/ocr_art_seg/dataset/danik_bhaskar_class_maps/'
+        ,root_dir= '/media/sagan/Drive2/sagar/ocr_art_seg/dataset/danik_bhaskar_pngs/')
+    
+    test_dataset = SegmentationImageDataset(image_list[30000:], mask_dir='/media/sagan/Drive2/sagar/ocr_art_seg/dataset/danik_bhaskar_class_maps/'
+        ,root_dir= '/media/sagan/Drive2/sagar/ocr_art_seg/dataset/danik_bhaskar_pngs/')
+    
+    train_dataloader = DataLoader(train_dataset, batch_size=32,shuffle=True, num_workers=4)
+    test_dataloader = DataLoader(test_dataset, batch_size=32,shuffle=True, num_workers=4)
 
-    TRAIN_SIZE = len(train_images)
-    TEST_SIZE = len(test_images)
     BATCH_SIZE = 32
     
     for epoch in range(200):
         total_loss = 0
         samples = 0
-        for i in range(0,TRAIN_SIZE,BATCH_SIZE):
+        for i_batch, sample_batched in enumerate(train_dataloader):
             inputs = []
             masks = []
-            max_local = 0
-            for j in range(i,i+BATCH_SIZE):
-                try:
-                    img = cv2.imread(images[j])
-                    img /= 255
-                    img = np.add(img, mean)
-                    img = np.divide(img, std)
-                except:
+            images_batch, marker_batch = sample_batched['image'], sample_batched['marker']
+            
+            batch_size = len(images_batch)
+            for j in range(batch_size):
+                max_local = 0
+                img = images_batch[j]
+                marker = marker_batch[j]
+                if img is None or marker is None:
                     continue
-                if img is None:
-                    continue
-                with open(masks_dir + images[j].split('/')[-1].split('.')[0] + '.pkl', 'r') as f:
-                    x = pickle.load(f)
-                marker = np.zeros((img.shape[0],img.shape[1]))
-                for k in x:
-                    box = k
-                    marker[box[0]:box[2],box[1]:box[3]] = x[k]
-                img = cv2.resize(img,(256,256))
-                img = np.transpose(img,(2,1,0))
-                marker = cv2.resize(marker,(256,256))
-                mark = marker.astype(int)
                 mask = np.zeros((256,256,13))
-                for k in range(mark.shape[0]):
-                    for l in range(mark.shape[1]):
-                        mask[k,l,mark[k,l]] = 1
+                for k in range(marker.shape[0]):
+                    for l in range(marker.shape[1]):
+                        val = int(marker[k,l].cpu().data)
+                        mask[k,l,marker[k,l]] = 1
                 masks.append(mask)
                 inputs.append(img)
+            
+            inputs = [t.numpy() for t in inputs]
 
             inputs = np.asarray(inputs, dtype=np.float32)
             masks = np.asarray(masks, dtype=np.float32)
@@ -123,10 +133,86 @@ def train():
                 loss.backward()
                 optimizer.step()
                 samples += 1
-                actual = masks.cpu().numpy()
-                output = (masks_probs > 0.5).float()[:,0]
-                torch.save(net.state_dict(), "unet_final_checkpoint/model_at_" + str(epoch) + ".pt")
+            torch.save(net.state_dict(), save_dir + 'model_at_' + str(epoch) + '.pt')
+        total_ious = []
+        pixel_accs = []
+        _,pred = masks_probs.max(1)
+        pred = pred.cpu().data.numpy().reshape(BATCH_SIZE, 256, 256)
+        _,expec = masks.max(3)
+        target = expec.cpu().data.numpy().reshape(BATCH_SIZE, 256, 256)
+        
+        for p, t in zip(pred, target):
+            total_ious.append(iou(p, t))
+            pixel_accs.append(pixel_acc(p, t))
+        #  Calculate average IoU
+        total_ious = np.array(total_ious).T  # n_class * val_len
+        ious = np.nanmean(total_ious, axis=1)
+        pixel_accs = np.array(pixel_accs).mean()
+        print("Mean Train IOU for each class after epoch {} ",epoch)
+        print(ious)
+        print(" Train Precision after epoch {} is {}",epoch,pixel_accs )
+        print(pixel_accs)
+
         total_loss = total_loss/float(samples)
         print ('##############################################################')
-        print ("{} loss = {}".format(epoch, total_loss))
+        print ("{} Train_loss = {}".format(epoch, total_loss))
+        
+        total_loss = 0
+        samples = 0
+        for i in range(TRAIN_SIZE + 1,TRAIN_SIZE + TEST_SIZE,BATCH_SIZE):
+            inputs = []
+            masks = []
+            max_local = 0
+            for j in range(i,i+BATCH_SIZE):
+                sample = segmentation_dataset[j]
+                img = sample['image']
+                marker = sample['marker']
+                if img is None or marker is None:
+                    continue
+                mask = np.zeros((256,256,13))
+                for k in range(marker.shape[0]):
+                    for l in range(marker.shape[1]):
+                        val = int(marker[k,l].cpu().data)
+                        mask[k,l,marker[k,l]] = 1
+                masks.append(mask)
+                inputs.append(img)
+
+            inputs = [t.numpy() for t in inputs]
+
+            inputs = np.asarray(inputs, dtype=np.float32)
+            masks = np.asarray(masks, dtype=np.float32)
+            inputs, masks = Variable(torch.from_numpy(inputs).cuda(1)), Variable(torch.from_numpy(masks).cuda(1))
+            if len(masks) == BATCH_SIZE:
+                # forward + backward + optimize
+                result = net(inputs)
+                masks_probs = F.sigmoid(result)
+                masks_probs_flat = masks_probs.view(-1)
+                true_masks_flat = masks.view(-1)
+                loss = criterion(masks_probs_flat, true_masks_flat)
+                total_loss += loss.item()
+                samples += 1
+        
+        total_ious = []
+        pixel_accs = []
+        _,pred = masks_probs.max(1)
+        pred = pred.cpu().data.numpy().reshape(BATCH_SIZE, 256, 256)
+        _,expec = masks.max(3)
+        target = expec.cpu().data.numpy().reshape(BATCH_SIZE, 256, 256)
+        
+        for p, t in zip(pred, target):
+            total_ious.append(iou(p, t))
+            pixel_accs.append(pixel_acc(p, t))
+        
+        total_ious = np.array(total_ious).T  # n_class * val_len
+        ious = np.nanmean(total_ious, axis=1)
+        pixel_accs = np.array(pixel_accs).mean()
+        print("Mean Test IOU for each class after epoch {} ",epoch)
+        print(ious)
+        print(" Test Precision after epoch {} is {}",epoch,pixel_accs )
+        print(pixel_accs)
+                
+        total_loss = total_loss/float(samples)
+        print ('##############################################################')
+        print ("{} Test_loss = {}".format(epoch, total_loss))
+
 train()
