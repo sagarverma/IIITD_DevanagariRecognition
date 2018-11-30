@@ -48,7 +48,9 @@ def dqn_learing(
     learning_starts=50000,
     learning_freq=4,
     frame_history_len=4,
-    target_update_freq=10000
+    target_update_freq=10000,
+    num_actions1=31,
+    num_actions2=27
     ):
 
     """Run Deep Q-learning algorithm.
@@ -99,8 +101,6 @@ def dqn_learing(
 
     img_h, img_w, img_c = 32, 120, 1
     input_arg = frame_history_len * img_c
-    num_actions1 = 2
-    num_actions2 = 27
 
     # Construct an epilson greedy policy with given exploration schedule
     def select_epilson_greedy_action(model, obs, t):
@@ -109,14 +109,16 @@ def dqn_learing(
         if sample > eps_threshold:
             obs = torch.from_numpy(obs).type(dtype).unsqueeze(0)
             # Use volatile = True if variable is only used in inference mode, i.e. don't save the history
-            out1, out2 = model(Variable(obs, volatile=True))
-            return out1.data.max(1)[1].cpu(), out2.data.max(1)[1].cpu()
+            out1, out2 = model(Variable(obs))
+            out1 = out1.max(1)[1].data.cpu().numpy()[0]
+            out2 = out2.max(1)[1].data.cpu().numpy()[0]
+            return out1, out2
         else:
-            return torch.IntTensor([[random.randrange(num_actions1)]]), torch.IntTensor([[random.randrange(num_actions2)]])
+            return random.randrange(num_actions1), random.randrange(num_actions2)
 
     # Initialize target q function and q function
-    Q = q_func().cuda(0).type(dtype)
-    target_Q = q_func().cuda(0).type(dtype)
+    Q = q_func(num_actions1, num_actions2).cuda(0).type(dtype)
+    target_Q = q_func(num_actions1, num_actions2).cuda(0).type(dtype)
 
     # Construct Q network optimizer function
     optimizer = optimizer_spec.constructor(Q.parameters(), **optimizer_spec.kwargs)
@@ -133,6 +135,7 @@ def dqn_learing(
     last_obs = env.reset()
     LOG_EVERY_N_STEPS = 10000
 
+    epoch_reward = []
     for t in count():
 
         ### Step the env and store the transition
@@ -147,13 +150,13 @@ def dqn_learing(
         # Choose random action if not yet start learning
         if t > learning_starts:
             action1, action2 = select_epilson_greedy_action(Q, recent_observations, t)
-            action1 = action1.data.cpu().numpy()[0][0]
-            action2 = action2.data.cpu().numpy()[0][0]
         else:
             action1, action2 = random.randrange(num_actions1), random.randrange(num_actions2)
         # Advance one step
         obs, reward, done = env.step(action1, action2)
-        # env.render()
+        epoch_reward.append(reward)
+        if done:
+            env.render()
         # clip rewards between -1 and 1
         # reward = max(-1.0, min(reward, 1.0))
         # Store other info in replay memory
@@ -161,6 +164,10 @@ def dqn_learing(
         # Resets the environment when reaching an episode boundary.
         if done:
             obs = env.reset()
+            print np.mean(epoch_reward)
+            epoch_reward = []
+            torch.save(Q,'../../weights/Q' + str(num_actions1) + '.pt')
+            torch.save(target_Q,'../../weights/target_Q' + str(num_actions1) + '.pt')
         last_obs = obs
 
         ### Perform experience replay and train the network.
@@ -205,8 +212,8 @@ def dqn_learing(
             target_Q1_values = rew_batch + (gamma * next_Q1_values)
             target_Q2_values = rew_batch + (gamma * next_Q2_values)
             # Compute Bellman error
-            bellman_error1 = target_Q1_values - current_Q1_values
-            bellman_error2 = target_Q2_values - current_Q2_values
+            bellman_error1 = target_Q1_values.unsqueeze(1) - current_Q1_values
+            bellman_error2 = target_Q2_values.unsqueeze(1) - current_Q2_values
             bellman_error = bellman_error1 + bellman_error2
             # clip the bellman error between [-1 , 1]
             clipped_bellman_error = bellman_error.clamp(-1, 1)
@@ -216,8 +223,7 @@ def dqn_learing(
             optimizer.zero_grad()
             # run backward pass
             current_Q_values = current_Q1_values + current_Q2_values
-            print current_Q_values.size(), d_error.size()
-            current_Q_values.backward(d_error.data.unsqueeze(1))
+            current_Q_values.backward(d_error.data)
 
             # Perfom the update
             optimizer.step()
@@ -226,6 +232,7 @@ def dqn_learing(
             # Periodically update the target network by Q network to target Q network
             if num_param_updates % target_update_freq == 0:
                 target_Q.load_state_dict(Q.state_dict())
+
 
         ### 4. Log progress and keep track of statistics
         # episode_rewards = get_wrapper_by_name(env, "Monitor").get_episode_rewards()

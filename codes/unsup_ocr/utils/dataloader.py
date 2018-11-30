@@ -157,8 +157,8 @@ def default_loader(path):
     else:
         return pil_loader(path)
 
-def text_loader(target, resize=True):
-    word = target + ' ' * (2 - len(target))
+def text_loader(target, word_len, resize=True):
+    word = target + ' ' * (word_len - len(target))
     img = scribe_wrapper(word, "Devanagri 24", 45, 5, 0, 0)
     if resize:
         img = cv2.resize(img, (120, 32))

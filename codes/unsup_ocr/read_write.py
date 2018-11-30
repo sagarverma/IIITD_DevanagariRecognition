@@ -31,14 +31,15 @@ inv_class_map[26] = ' '
 
 class Environment(object):
 
-    def __init__(self, text_file, sim_speed=0.0001):
+    def __init__(self, text_file, word_len, sim_speed=0.0001):
         self.text_file = text_file
+        self.word_len = word_len
         self.words = self._get_words()
         self.sim_speed = sim_speed
 
-        self.board, self.word = text_loader(random.sample(self.words, 1)[0], False)
+        self.board, self.word = text_loader(random.sample(self.words, 1)[0], self.word_len, False)
         self.board_size = self.board.shape
-        self.slate = [' ' for x in range(2)]
+        self.slate = [' ' for x in range(self.word_len)]
 
         self.done = False
 
@@ -46,12 +47,12 @@ class Environment(object):
         r = csv.reader(open(self.text_file, 'r'))
         words = []
         for row in r:
-            if len(row[0]) <= 2:
+            if len(row[0]) <= self.word_len:
                 words.append(row[0])
         return words
 
     def _get_rewards(self):
-        slate_image, _ = text_loader(''.join(self.slate), False)
+        slate_image, _ = text_loader(''.join(self.slate), self.word_len, False)
         # reward = 1 - mse(self.board.flatten(), slate_image.flatten())
         reward = ssim(self.board, slate_image)
         if reward == 1:
@@ -60,14 +61,14 @@ class Environment(object):
 
     def step(self, write_head, write_char):
         self.slate[write_head] = inv_class_map[write_char]
-        slate_image, _ = text_loader(''.join(self.slate), False)
+        slate_image, _ = text_loader(''.join(self.slate), self.word_len, False)
         img_diff = self.board - slate_image
         img_diff = cv2.resize(img_diff, (120,32))
         img_diff = np.asarray([img_diff])
         return img_diff, self._get_rewards(), self.done
 
     def render(self):
-        slate_image, _ = text_loader(''.join(self.slate), False)
+        slate_image, _ = text_loader(''.join(self.slate), self.word_len, False)
         img = np.concatenate((self.board, slate_image), axis=0)
 
         plt.imshow(img, cmap='gray')
@@ -76,13 +77,13 @@ class Environment(object):
 
 
     def reset(self):
-        self.board, self.word = text_loader(random.sample(self.words, 1)[0], False)
+        self.board, self.word = text_loader(random.sample(self.words, 1)[0], self.word_len, False)
         self.board_size = self.board.shape
-        self.slate = [' ' for x in range(2)]
+        self.slate = [' ' for x in range(self.word_len)]
 
         self.done = False
 
-        slate_image, _ = text_loader(''.join(self.slate), False)
+        slate_image, _ = text_loader(''.join(self.slate), self.word_len, False)
         img_diff = self.board - slate_image
         img_diff = cv2.resize(img_diff, (120,32))
         img_diff = np.asarray([img_diff])
